@@ -1,0 +1,6 @@
+{
+  "name": "BranchLens",
+  "description": "One problem. Many ways to see it. Explore how diverse disciplines analyze, critique, and expand real-world solutions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
