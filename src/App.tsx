@@ -41,6 +41,7 @@ export default function App() {
   // Active Inquiry State
   const [selectedProblem, setSelectedProblem] = useState<Problem | null>(null);
   const [selectedSolution, setSelectedSolution] = useState<Solution | null>(null);
+  const [selectedSolutionId, setSelectedSolutionId] = useState<string>('');
   const [selectedSession, setSelectedSession] = useState<AnalysisSession | null>(null);
 
   // Progressive Analysis Simulation State
@@ -48,6 +49,71 @@ export default function App() {
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisCurrentDiscipline, setAnalysisCurrentDiscipline] = useState<string | undefined>();
   const [activeAnalysisDisciplines, setActiveAnalysisDisciplines] = useState<Discipline[]>([]);
+
+  // Navigation with hash synchronization for clean browser refresh persistence
+  const navigateTo = (view: AppView, solutionId?: string) => {
+    setCurrentView(view);
+    if (solutionId) {
+      setSelectedSolutionId(solutionId);
+      window.location.hash = `#/${view}?solutionId=${solutionId}`;
+    } else if (selectedSolutionId && (view === 'lens-analysis' || view === 'cross-lens-comparison' || view === 'choose-lenses' || view === 'solution-workspace')) {
+      window.location.hash = `#/${view}?solutionId=${selectedSolutionId}`;
+    } else {
+      window.location.hash = `#/${view}`;
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Restore navigation and context from URL hash or storage across refreshes
+  useEffect(() => {
+    const handleHashRoute = async () => {
+      const hash = window.location.hash;
+      if (hash && hash.startsWith('#/')) {
+        const withoutPrefix = hash.slice(2);
+        const [viewPart, queryPart] = withoutPrefix.split('?');
+        const validViews: AppView[] = [
+          'landing',
+          'auth',
+          'workspace',
+          'new-analysis',
+          'create-problem',
+          'problem-library',
+          'problem-brief',
+          'solution-workspace',
+          'choose-lenses',
+          'analysis-loading',
+          'lens-analysis',
+          'cross-lens-comparison',
+          'profile',
+          'discipline-explorer',
+          'my-work',
+          'settings',
+        ];
+
+        if (viewPart && validViews.includes(viewPart as AppView)) {
+          setCurrentView(viewPart as AppView);
+        }
+
+        if (queryPart) {
+          const params = new URLSearchParams(queryPart);
+          const solId = params.get('solutionId');
+          if (solId) {
+            setSelectedSolutionId(solId);
+            const sol = await solutionService.getSolutionById(solId);
+            if (sol) {
+              setSelectedSolution(sol);
+              const prob = await problemService.getProblemById(sol.problemId);
+              if (prob) setSelectedProblem(prob);
+            }
+          }
+        }
+      }
+    };
+
+    handleHashRoute();
+    window.addEventListener('hashchange', handleHashRoute);
+    return () => window.removeEventListener('hashchange', handleHashRoute);
+  }, []);
 
   // Initialize user & default seed context
   useEffect(() => {
@@ -58,30 +124,27 @@ export default function App() {
       // Pre-seed an initial default problem so all deep routes have rich context
       const problems = await problemService.getProblems();
       if (problems.length > 0) {
-        setSelectedProblem(problems[0]);
-        const solutions = await solutionService.getRecentSolutions();
-        const matched = solutions.find((s) => s.problemId === problems[0].id);
-        if (matched) {
-          setSelectedSolution(matched);
-        } else if (SEED_SOLUTIONS[0]) {
-          setSelectedSolution(SEED_SOLUTIONS[0]);
+        if (!selectedProblem) {
+          setSelectedProblem(problems[0]);
+        }
+        const sol = await solutionService.getSolutionByProblemId(problems[0].id);
+        if (!selectedSolution && sol) {
+          setSelectedSolution(sol);
+          setSelectedSolutionId(sol.id);
         }
       }
 
       // Check for any existing session
       const sessions = await analysisService.getRecentSessions();
-      if (sessions.length > 0) {
+      if (sessions.length > 0 && !selectedSession) {
         setSelectedSession(sessions[0]);
+        if (!selectedSolutionId) {
+          setSelectedSolutionId(sessions[0].solutionId);
+        }
       }
     };
     initApp();
   }, []);
-
-  // Scroll to top on route change
-  const navigateTo = (view: AppView) => {
-    setCurrentView(view);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
 
   const handleSignOut = async () => {
     await authService.signOut();
@@ -91,30 +154,48 @@ export default function App() {
 
   const handleProblemSelected = async (prob: Problem) => {
     setSelectedProblem(prob);
-    // Find associated solution or default
-    const sols = await solutionService.getRecentSolutions();
-    const matched = sols.find((s) => s.problemId === prob.id) || null;
-    setSelectedSolution(matched);
+    const sol = await solutionService.getSolutionByProblemId(prob.id);
+    setSelectedSolution(sol);
+    if (sol) setSelectedSolutionId(sol.id);
   };
 
   const handleProblemSaved = (saved: Problem) => {
     setSelectedProblem(saved);
   };
 
-  const handleStartSolution = (prob: Problem) => {
+  const handleStartSolution = async (prob: Problem) => {
     setSelectedProblem(prob);
-    navigateTo('solution-workspace');
+    let sol = await solutionService.getSolutionByProblemId(prob.id);
+    if (!sol) {
+      sol = await solutionService.saveSolution({
+        id: `sol-${prob.id}`,
+        problemId: prob.id,
+        title: `Decentralized Adaptive Framework for ${prob.title}`,
+        proposedApproach: `A community-anchored, open-standard intervention structured to directly counter the systemic vulnerabilities outlined in ${prob.title}.`,
+        howItWorks: `Combines robust physical infrastructure with localized governance protocols, iterative peer monitoring, and open diagnostic benchmarks.`,
+        keyAssumptions: `Assumes local community leadership can sustain operational stewardship with minimal ongoing external dependencies.`,
+        targetAudience: prob.peopleAffected || 'Impacted community stakeholders',
+        tradeOffs: `Trades rapid centralized deployment speed for resilient, localized autonomy and long-term diagnostic transparency.`,
+      });
+    }
+    setSelectedSolution(sol);
+    setSelectedSolutionId(sol.id);
+    navigateTo('solution-workspace', sol.id);
   };
 
-  const handleProceedToLenses = (sol: Solution) => {
-    setSelectedSolution(sol);
-    navigateTo('choose-lenses');
+  const handleProceedToLenses = async (sol: Solution) => {
+    const savedSol = await solutionService.saveSolution(sol);
+    setSelectedSolution(savedSol);
+    setSelectedSolutionId(savedSol.id);
+    navigateTo('choose-lenses', savedSol.id);
   };
 
   const handleRunAnalysis = async (selectedDisciplineIds: string[]) => {
     if (!selectedProblem || !selectedSolution) return;
 
-    const discs = lensService.getDisciplinesByIds(selectedDisciplineIds);
+    // Convert all inputs to real UUIDs from public.disciplines.id
+    const realDisciplineUuids = selectedDisciplineIds.map((id) => lensService.getDisciplineUuid(id));
+    const discs = lensService.getDisciplinesByIds(realDisciplineUuids);
     setActiveAnalysisDisciplines(discs);
     navigateTo('analysis-loading');
 
@@ -122,7 +203,7 @@ export default function App() {
       const session = await analysisService.executeAnalysis(
         selectedProblem,
         selectedSolution,
-        selectedDisciplineIds,
+        realDisciplineUuids,
         (progress, stage, disciplineName) => {
           setAnalysisProgress(progress);
           setAnalysisStage(stage);
@@ -133,14 +214,15 @@ export default function App() {
       // Record in profile
       await profileService.recordAnalysis(session);
       setSelectedSession(session);
+      setSelectedSolutionId(session.solutionId);
 
-      // Smooth transition to analysis view
+      // Smooth transition to analysis view using the REAL persisted solution UUID
       setTimeout(() => {
-        navigateTo('lens-analysis');
+        navigateTo('lens-analysis', session.solutionId);
       }, 500);
     } catch (err) {
       console.error('Analysis failed', err);
-      navigateTo('choose-lenses');
+      navigateTo('choose-lenses', selectedSolution.id);
     }
   };
 
@@ -189,6 +271,8 @@ export default function App() {
             }}
             onSelectSession={(sess) => {
               setSelectedSession(sess);
+              setSelectedSolutionId(sess.solutionId);
+              navigateTo('lens-analysis', sess.solutionId);
             }}
           />
         )}
@@ -221,9 +305,9 @@ export default function App() {
           />
         )}
 
-        {currentView === 'solution-workspace' && selectedProblem && (
+        {currentView === 'solution-workspace' && (
           <SolutionWorkspacePage
-            problem={selectedProblem}
+            problem={selectedProblem || ({} as any)}
             existingSolution={selectedSolution}
             onProceedToLenses={handleProceedToLenses}
             onNavigate={navigateTo}
@@ -245,22 +329,29 @@ export default function App() {
             currentStage={analysisStage}
             progressPercent={analysisProgress}
             currentDisciplineName={analysisCurrentDiscipline}
-            onComplete={() => navigateTo('lens-analysis')}
+            onComplete={() => navigateTo('lens-analysis', selectedSolutionId || selectedSolution?.id)}
           />
         )}
 
-        {currentView === 'lens-analysis' && selectedSession && selectedProblem && selectedSolution && (
+        {currentView === 'lens-analysis' && (
           <LensAnalysisPage
+            solutionId={selectedSolutionId || selectedSolution?.id || selectedSession?.solutionId}
             session={selectedSession}
             problem={selectedProblem}
             solution={selectedSolution}
-            onComparePerspectives={() => navigateTo('cross-lens-comparison')}
+            onComparePerspectives={() =>
+              navigateTo('cross-lens-comparison', selectedSolutionId || selectedSolution?.id)
+            }
             onNavigate={navigateTo}
+            onUpdateSession={(sess) => {
+              setSelectedSession(sess);
+            }}
           />
         )}
 
-        {currentView === 'cross-lens-comparison' && selectedSession && selectedProblem && selectedSolution && (
+        {currentView === 'cross-lens-comparison' && (
           <CrossLensComparisonPage
+            solutionId={selectedSolutionId || selectedSolution?.id || selectedSession?.solutionId}
             session={selectedSession}
             problem={selectedProblem}
             solution={selectedSolution}
@@ -283,6 +374,8 @@ export default function App() {
             }}
             onSelectSession={(sess) => {
               setSelectedSession(sess);
+              setSelectedSolutionId(sess.solutionId);
+              navigateTo('lens-analysis', sess.solutionId);
             }}
             onNavigate={navigateTo}
           />

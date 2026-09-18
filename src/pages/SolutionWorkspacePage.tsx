@@ -51,10 +51,10 @@ export const SolutionWorkspacePage: React.FC<SolutionWorkspacePageProps> = ({
       setTitle(existingSolution.title);
       setProposedApproach(existingSolution.proposedApproach);
       setHowItWorks(existingSolution.howItWorks);
-      setImplementationPlan(existingSolution.implementationPlan);
-      setResourcesRequired(existingSolution.resourcesRequired);
-      setTradeOffs(existingSolution.tradeOffs);
-      setRisks(existingSolution.risks);
+      setImplementationPlan(existingSolution.implementationPlan || '');
+      setResourcesRequired(existingSolution.resourcesRequired || '');
+      setTradeOffs(existingSolution.tradeOffs || '');
+      setRisks(existingSolution.risks || '');
       setAdditionalNotes(existingSolution.additionalNotes || '');
       return;
     }
@@ -149,34 +149,38 @@ export const SolutionWorkspacePage: React.FC<SolutionWorkspacePageProps> = ({
     setIsSaving(true);
     try {
       let saved: Solution;
+      const payload = {
+        problemId: problem.id,
+        title,
+        proposedApproach,
+        howItWorks,
+        implementationPlan,
+        resourcesRequired,
+        tradeOffs,
+        risks,
+        additionalNotes,
+      };
+
       if (existingSolution) {
-        saved = await solutionService.updateSolution(existingSolution.id, {
-          title,
-          proposedApproach,
-          howItWorks,
-          implementationPlan,
-          resourcesRequired,
-          tradeOffs,
-          risks,
-          additionalNotes,
-        });
+        try {
+          saved = await solutionService.updateSolution(existingSolution.id, payload);
+        } catch {
+          saved = await solutionService.saveSolution({
+            ...payload,
+            id: existingSolution.id,
+          });
+        }
       } else {
-        saved = await solutionService.saveSolution({
-          problemId: problem.id,
-          title,
-          proposedApproach,
-          howItWorks,
-          implementationPlan,
-          resourcesRequired,
-          tradeOffs,
-          risks,
-          additionalNotes,
-        });
+        saved = await solutionService.saveSolution(payload);
       }
 
       onProceedToLenses(saved);
     } catch (err) {
       console.error('Failed to save solution', err);
+      setErrors((prev) => ({
+        ...prev,
+        submit: 'Failed to save solution. Please check required fields and try again.',
+      }));
     } finally {
       setIsSaving(false);
     }
@@ -474,6 +478,12 @@ export const SolutionWorkspacePage: React.FC<SolutionWorkspacePageProps> = ({
               className="w-full rounded-xl border border-zinc-200 bg-zinc-50/50 p-3 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-900 focus:bg-white focus:outline-hidden"
             />
           </div>
+
+          {errors.submit && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs font-medium text-rose-700">
+              {errors.submit}
+            </div>
+          )}
 
           {/* Action Row */}
           <div className="pt-4 border-t border-zinc-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">

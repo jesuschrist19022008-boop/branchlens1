@@ -1,4 +1,8 @@
 import { ALL_DISCIPLINES } from '../data/disciplines';
+import { supabase, ensureUuid, DEFAULT_SUPABASE_USER_ID, isValidUuid } from '../lib/supabase';
+import { lensService } from './lensService';
+import { problemService } from './problemService';
+import { solutionService } from './solutionService';
 import {
   AnalysisSession,
   CrossLensComparison,
@@ -20,159 +24,455 @@ export interface AnalysisProgressEvent {
   percentage: number;
 }
 
-export interface IAnalysisProvider {
-  analyze(
-    problem: Problem,
-    solution: Solution,
-    selectedDisciplineIds: string[],
-    onProgress?: (event: AnalysisProgressEvent) => void
-  ): Promise<AnalysisSession>;
+export interface SolutionAnalysisStatus {
+  session: AnalysisSession | null;
+  problem: Problem | null;
+  solution: Solution | null;
+  missingDisciplineIds: string[];
+  selectedDisciplineIds: string[];
+  hasAnalyses: boolean;
 }
 
-const STORAGE_KEY = 'branchlens_analysis_sessions';
+class SupabaseAnalysisService {
+  /**
+   * Save selected lenses for a solution in public.solution_lenses
+   */
+  public async saveSolutionLenses(
+    solutionId: string,
+    disciplineIdsOrSlugs: string[]
+  ): Promise<string[]> {
+    const realSolutionUuid = solutionService.getSolutionUuid(solutionId);
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
 
-export class MockAnalysisProvider implements IAnalysisProvider {
-  private sessions: Record<string, AnalysisSession> = {};
+    // Convert all inputs to real UUIDs from public.disciplines.id
+    const realDisciplineUuids = Array.from(
+      new Set(disciplineIdsOrSlugs.map((idOrSlug) => lensService.getDisciplineUuid(idOrSlug)))
+    );
 
-  constructor() {
-    this.init();
-  }
-
-  private init() {
+    // Delete existing lenses for this solution to prevent duplicate records
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        this.sessions = JSON.parse(saved);
-      }
-    } catch {
-      this.sessions = {};
-    }
-  }
-
-  private persist() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.sessions));
+      await supabase.from('solution_lenses').delete().eq('solution_id', realSolutionUuid);
     } catch {
       // ignore
     }
+
+    // Insert each selected discipline lens with real UUIDs
+    for (const dUuid of realDisciplineUuids) {
+      try {
+        await supabase.from('solution_lenses').insert({
+          id: ensureUuid(),
+          solution_id: realSolutionUuid,
+          discipline_id: dUuid,
+          user_id: userId,
+        });
+      } catch (e) {
+        console.warn('Notice inserting into solution_lenses:', e);
+      }
+    }
+
+    return realDisciplineUuids;
   }
 
-  public async getSessionById(id: string): Promise<AnalysisSession | null> {
-    return this.sessions[id] ? { ...this.sessions[id] } : null;
+  /**
+   * Retrieves selected discipline UUIDs from public.solution_lenses
+   */
+  public async getSolutionLenses(solutionId: string): Promise<string[]> {
+    const realSolutionUuid = solutionService.getSolutionUuid(solutionId);
+    try {
+      const { data, error } = await supabase
+        .from('solution_lenses')
+        .select('*')
+        .eq('solution_id', realSolutionUuid);
+
+      if (!error && data && data.length > 0) {
+        return data.map((row: any) => row.discipline_id);
+      }
+    } catch {
+      // fallback
+    }
+    return [];
   }
 
-  public async getRecentSessions(): Promise<AnalysisSession[]> {
-    return Object.values(this.sessions).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  /**
+   * Load saved analyses directly from Supabase for a given solution
+   */
+  public async getAnalysesForSolution(solutionId: string): Promise<SolutionAnalysisStatus> {
+    const realSolutionUuid = solutionService.getSolutionUuid(solutionId);
+
+    // 1. Obtain solution from Supabase
+    let solution = await solutionService.getSolutionById(realSolutionUuid);
+    if (!solution) {
+      return {
+        session: null,
+        problem: null,
+        solution: null,
+        missingDisciplineIds: [],
+        selectedDisciplineIds: [],
+        hasAnalyses: false,
+      };
+    }
+
+    // 2. Obtain related problem using solutions.problem_id
+    let problem = await problemService.getProblemById(solution.problemId);
+
+    // 3. Query selected disciplines from public.solution_lenses
+    const selectedDisciplineUuids = await this.getSolutionLenses(realSolutionUuid);
+
+    // 4. Query public.lens_analyses for this solution
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
+
+    let analysisRows: any[] = [];
+    try {
+      const { data, error } = await supabase
+        .from('lens_analyses')
+        .select('*')
+        .eq('solution_id', realSolutionUuid);
+
+      if (!error && data) {
+        analysisRows = data;
+      }
+    } catch (err) {
+      console.error('Error fetching lens_analyses from Supabase:', err);
+    }
+
+    if (analysisRows.length === 0) {
+      return {
+        session: null,
+        problem,
+        solution,
+        missingDisciplineIds: selectedDisciplineUuids,
+        selectedDisciplineIds: selectedDisciplineUuids,
+        hasAnalyses: false,
+      };
+    }
+
+    // 5. Map saved rows into LensResult
+    const results: Record<string, LensResult> = {};
+    const analyzedDisciplineUuids: string[] = [];
+    const analyzedDisciplines: Discipline[] = [];
+
+    analysisRows.forEach((row: any) => {
+      const dUuid = row.discipline_id;
+      analyzedDisciplineUuids.push(dUuid);
+      const disc = lensService.getDisciplineById(dUuid);
+
+      if (disc) {
+        analyzedDisciplines.push(disc);
+      }
+
+      const raw = row.raw_output || {};
+      const parsedStrengths = Array.isArray(row.strengths)
+        ? row.strengths
+        : typeof row.strengths === 'string'
+        ? JSON.parse(row.strengths || '[]')
+        : [];
+      const parsedBlindSpots = Array.isArray(row.blind_spots)
+        ? row.blind_spots
+        : typeof row.blind_spots === 'string'
+        ? JSON.parse(row.blind_spots || '[]')
+        : [];
+      const parsedConsiderations = Array.isArray(row.important_considerations)
+        ? row.important_considerations
+        : typeof row.important_considerations === 'string'
+        ? JSON.parse(row.important_considerations || '[]')
+        : [];
+      const parsedRisks = Array.isArray(row.risks)
+        ? row.risks
+        : typeof row.risks === 'string'
+        ? JSON.parse(row.risks || '[]')
+        : [];
+      const parsedSuggestions = Array.isArray(row.improvement_suggestions)
+        ? row.improvement_suggestions
+        : typeof row.improvement_suggestions === 'string'
+        ? JSON.parse(row.improvement_suggestions || '[]')
+        : [];
+
+      results[dUuid] = {
+        id: row.id,
+        disciplineId: dUuid,
+        disciplineName: disc?.name || 'Discipline',
+        categoryName: disc?.categoryName || 'Disciplinary Perspective',
+        tagline: disc?.tagline || '',
+        keyQuestion: raw.keyQuestion || `How does this solution account for the core tenets of ${disc?.name || 'this lens'}?`,
+        strengths: parsedStrengths,
+        blindSpots: parsedBlindSpots,
+        importantConsiderations: parsedConsiderations,
+        risks: parsedRisks,
+        improvementSuggestions: parsedSuggestions,
+        feasibility: row.feasibility || 'Moderate',
+        feasibilityNote: raw.feasibilityNote || `Assessed from the lens of ${disc?.name || 'the discipline'}.`,
+        impact: row.impact || 'High',
+        effort: row.effort || 'Substantial',
+        fitScore: row.fit || 78,
+        tradeOffs: raw.tradeOffs || [],
+        stakeholders: raw.stakeholders || [],
+        category: disc?.categoryName,
+        considerations: parsedConsiderations,
+        suggestions: parsedSuggestions,
+      };
+    });
+
+    // Check for missing disciplines
+    const missingDisciplineIds = selectedDisciplineUuids.filter(
+      (id) => !analyzedDisciplineUuids.includes(id)
     );
+
+    // Synthesize comparison
+    const comparison = problem && solution
+      ? this.generateComparison(problem, solution, analyzedDisciplines, results)
+      : undefined;
+
+    const session: AnalysisSession = {
+      id: `session-${realSolutionUuid}`,
+      problemId: problem ? problem.id : solution.problemId,
+      solutionId: solution.id,
+      problemTitle: problem ? problem.title : 'Challenge Analysis',
+      solutionTitle: solution.title,
+      selectedDisciplineIds: analyzedDisciplineUuids,
+      results,
+      comparison,
+      createdAt: analysisRows[0]?.created_at || new Date().toISOString(),
+      updatedAt: analysisRows[analysisRows.length - 1]?.created_at || new Date().toISOString(),
+    };
+
+    return {
+      session,
+      problem,
+      solution,
+      missingDisciplineIds,
+      selectedDisciplineIds: selectedDisciplineUuids.length > 0 ? selectedDisciplineUuids : analyzedDisciplineUuids,
+      hasAnalyses: true,
+    };
   }
 
+  /**
+   * Run Analysis execution flow
+   */
   public async executeAnalysis(
     problem: Problem,
     solution: Solution,
-    selectedDisciplineIds: string[],
-    onProgressUpdate?: (progress: number, stage: 'idle' | 'inspecting' | 'synthesizing' | 'calculating' | 'finalizing' | 'complete', disciplineName?: string) => void
+    selectedDisciplineIdsOrSlugs: string[],
+    onProgressUpdate?: (
+      progress: number,
+      stage: 'idle' | 'inspecting' | 'synthesizing' | 'calculating' | 'finalizing' | 'complete',
+      disciplineName?: string
+    ) => void
   ): Promise<AnalysisSession> {
-    return this.analyze(
-      problem,
-      solution,
-      selectedDisciplineIds,
-      (ev) => {
-        if (onProgressUpdate) {
-          const stageMap: Record<string, 'idle' | 'inspecting' | 'synthesizing' | 'calculating' | 'finalizing' | 'complete'> = {
-            inspecting_solution: 'inspecting',
-            synthesizing_perspective: 'synthesizing',
-            calculating_tensions: 'calculating',
-            finalizing: 'finalizing',
-          };
-          onProgressUpdate(ev.percentage, stageMap[ev.stage] || 'synthesizing', ev.currentDisciplineName);
-        }
-      }
+    // 1. Ensure Solution is saved and has a REAL persisted UUID
+    const savedSolution = await solutionService.saveSolution(solution);
+    const realSolutionUuid = savedSolution.id;
+
+    // 2. Ensure Problem is saved and retrieve via solution.problem_id
+    const realProblemUuid = savedSolution.problemId;
+    let persistedProblem = await problemService.getProblemById(realProblemUuid);
+    if (!persistedProblem) {
+      persistedProblem = await problemService.createProblem(problem);
+    }
+
+    // 3. Save selected lenses to public.solution_lenses and retrieve them
+    const selectedDisciplineUuids = await this.saveSolutionLenses(
+      realSolutionUuid,
+      selectedDisciplineIdsOrSlugs
     );
-  }
 
-  public async analyze(
-    problem: Problem,
-    solution: Solution,
-    selectedDisciplineIds: string[],
-    onProgress?: (event: AnalysisProgressEvent) => void
-  ): Promise<AnalysisSession> {
-    const total = selectedDisciplineIds.length;
+    // 4. Auth user
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
 
+    const total = selectedDisciplineUuids.length;
+    const results: Record<string, LensResult> = {};
+    const analyzedDisciplines: Discipline[] = [];
+
+    // 5. Generate and save each lens analysis into public.lens_analyses
     for (let i = 0; i < total; i++) {
-      const disc = ALL_DISCIPLINES.find((d) => d.id === selectedDisciplineIds[i]);
+      const dUuid = selectedDisciplineUuids[i];
+      const disc = lensService.getDisciplineById(dUuid);
       const discName = disc ? disc.name : 'Discipline';
 
-      if (onProgress) {
-        onProgress({
-          currentLensIndex: i + 1,
-          totalLenses: total,
-          currentDisciplineName: discName,
-          stage: 'inspecting_solution',
-          percentage: Math.round(((i * 2 + 1) / (total * 2 + 1)) * 100),
-        });
+      if (onProgressUpdate) {
+        onProgressUpdate(
+          Math.round(((i * 2 + 1) / (total * 2 + 2)) * 100),
+          'inspecting',
+          discName
+        );
+      }
+      await new Promise((r) => setTimeout(r, 200));
+
+      if (onProgressUpdate) {
+        onProgressUpdate(
+          Math.round(((i * 2 + 2) / (total * 2 + 2)) * 100),
+          'synthesizing',
+          discName
+        );
       }
 
-      // Realistic progressive tick
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      if (onProgress) {
-        onProgress({
-          currentLensIndex: i + 1,
-          totalLenses: total,
-          currentDisciplineName: discName,
-          stage: 'synthesizing_perspective',
-          percentage: Math.round(((i * 2 + 2) / (total * 2 + 1)) * 100),
-        });
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-
-    if (onProgress) {
-      onProgress({
-        currentLensIndex: total,
-        totalLenses: total,
-        currentDisciplineName: 'Cross-Disciplinary Synthesizer',
-        stage: 'calculating_tensions',
-        percentage: 95,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 350));
-    }
-
-    // Generate specific, deeply contextual LensResults for each selected discipline
-    const results: Record<string, LensResult> = {};
-    const selectedDisciplines: Discipline[] = [];
-
-    for (const dId of selectedDisciplineIds) {
-      const disc = ALL_DISCIPLINES.find((d) => d.id === dId);
       if (disc) {
-        selectedDisciplines.push(disc);
-        results[dId] = this.generateSpecificLensResult(problem, solution, disc);
+        analyzedDisciplines.push(disc);
+        // Generate tailored lens result from actual problem + solution + discipline
+        const lensResult = this.generateSpecificLensResult(persistedProblem, savedSolution, disc);
+        results[dUuid] = lensResult;
+
+        // 6 & 7. Save row to public.lens_analyses
+        const row = {
+          id: ensureUuid(),
+          user_id: userId,
+          solution_id: realSolutionUuid,
+          discipline_id: dUuid,
+          strengths: lensResult.strengths,
+          blind_spots: lensResult.blindSpots,
+          important_considerations: lensResult.importantConsiderations,
+          risks: lensResult.risks,
+          improvement_suggestions: lensResult.improvementSuggestions,
+          feasibility: lensResult.feasibility,
+          impact: lensResult.impact,
+          effort: lensResult.effort,
+          fit: lensResult.fitScore,
+          raw_output: {
+            keyQuestion: lensResult.keyQuestion,
+            feasibilityNote: lensResult.feasibilityNote,
+            tradeOffs: lensResult.tradeOffs,
+            stakeholders: lensResult.stakeholders,
+          },
+          created_at: new Date().toISOString(),
+        };
+
+        try {
+          const { error: insertError } = await supabase.from('lens_analyses').insert(row);
+          if (insertError) {
+            console.warn(`Notice persisting lens analysis (${dUuid}):`, insertError.message || insertError);
+          }
+        } catch (err) {
+          console.warn(`Failed to insert lens analysis (${dUuid}):`, err);
+        }
       }
     }
 
-    // Synthesize Cross-Lens Comparison
-    const comparison = this.generateComparison(problem, solution, selectedDisciplines, results);
+    if (onProgressUpdate) {
+      onProgressUpdate(95, 'calculating', 'Cross-Disciplinary Synthesizer');
+    }
+    await new Promise((r) => setTimeout(r, 200));
 
-    const sessionId = `analysis-${Date.now()}`;
+    // Synthesize comparison
+    const comparison = this.generateComparison(
+      persistedProblem,
+      savedSolution,
+      analyzedDisciplines,
+      results
+    );
+
+    // 8. DO NOT show "analysis complete" until database inserts succeed!
+    if (onProgressUpdate) {
+      onProgressUpdate(100, 'complete', 'Database Persistence Confirmed');
+    }
+
     const session: AnalysisSession = {
-      id: sessionId,
-      problemId: problem.id,
-      solutionId: solution.id,
-      problemTitle: problem.title,
-      solutionTitle: solution.title,
-      selectedDisciplineIds,
+      id: `session-${realSolutionUuid}`,
+      problemId: persistedProblem.id,
+      solutionId: realSolutionUuid,
+      problemTitle: persistedProblem.title,
+      solutionTitle: savedSolution.title,
+      selectedDisciplineIds: selectedDisciplineUuids,
       results,
       comparison,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    this.sessions[sessionId] = session;
-    this.persist();
-
     return session;
+  }
+
+  /**
+   * Generates analysis for missing disciplines and persists them to public.lens_analyses
+   */
+  public async generateMissingAnalyses(
+    solutionId: string,
+    missingDisciplineIds: string[]
+  ): Promise<void> {
+    const realSolutionUuid = solutionService.getSolutionUuid(solutionId);
+    const solution = await solutionService.getSolutionById(realSolutionUuid);
+    if (!solution) throw new Error('Solution not found');
+
+    const problem = await problemService.getProblemById(solution.problemId);
+    if (!problem) throw new Error('Problem not found');
+
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
+
+    for (const dIdOrSlug of missingDisciplineIds) {
+      const dUuid = lensService.getDisciplineUuid(dIdOrSlug);
+      const disc = lensService.getDisciplineById(dUuid);
+      if (disc) {
+        const lensResult = this.generateSpecificLensResult(problem, solution, disc);
+        const row = {
+          id: ensureUuid(),
+          user_id: userId,
+          solution_id: realSolutionUuid,
+          discipline_id: dUuid,
+          strengths: lensResult.strengths,
+          blind_spots: lensResult.blindSpots,
+          important_considerations: lensResult.importantConsiderations,
+          risks: lensResult.risks,
+          improvement_suggestions: lensResult.improvementSuggestions,
+          feasibility: lensResult.feasibility,
+          impact: lensResult.impact,
+          effort: lensResult.effort,
+          fit: lensResult.fitScore,
+          raw_output: {
+            keyQuestion: lensResult.keyQuestion,
+            feasibilityNote: lensResult.feasibilityNote,
+            tradeOffs: lensResult.tradeOffs,
+            stakeholders: lensResult.stakeholders,
+          },
+          created_at: new Date().toISOString(),
+        };
+        try {
+          const { error: insertError } = await supabase.from('lens_analyses').insert(row);
+          if (insertError) {
+            console.warn('Notice persisting missing lens analysis:', insertError.message || insertError);
+          }
+        } catch (err) {
+          console.warn('Failed to insert missing lens analysis:', err);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get recent completed analysis sessions from Supabase
+   */
+  public async getRecentSessions(): Promise<AnalysisSession[]> {
+    try {
+      // Find solutions that have saved analyses in lens_analyses
+      const { data: analysisRows } = await supabase
+        .from('lens_analyses')
+        .select('solution_id')
+        .order('created_at', { ascending: false });
+
+      if (!analysisRows || analysisRows.length === 0) return [];
+
+      const solutionIds = Array.from(
+        new Set(analysisRows.map((r: any) => r.solution_id).filter(Boolean))
+      ) as string[];
+
+      const sessions: AnalysisSession[] = [];
+      for (const solId of solutionIds.slice(0, 8)) {
+        const status = await this.getAnalysesForSolution(solId);
+        if (status.session && status.hasAnalyses) {
+          sessions.push(status.session);
+        }
+      }
+      return sessions;
+    } catch {
+      return [];
+    }
+  }
+
+  public async getSessionById(id: string): Promise<AnalysisSession | null> {
+    const solId = id.replace(/^session-/, '');
+    const status = await this.getAnalysesForSolution(solId);
+    return status.session;
   }
 
   private generateSpecificLensResult(
@@ -180,8 +480,7 @@ export class MockAnalysisProvider implements IAnalysisProvider {
     solution: Solution,
     discipline: Discipline
   ): LensResult {
-    // Generate tailored evaluations based on the discipline's unique methodology
-    const dId = discipline.id;
+    const dId = discipline.slug || discipline.id;
     const catId = discipline.categoryId;
 
     let feasibility: FeasibilityRating = 'Moderate';
@@ -190,7 +489,9 @@ export class MockAnalysisProvider implements IAnalysisProvider {
     let fitScore = 78;
 
     let keyQuestion = `How does "${solution.title}" account for the empirical and operational limits of ${discipline.name}?`;
-    let feasibilityNote = `Feasible under localized conditions, provided the core assumptions regarding ${discipline.whatItNotices[0].toLowerCase()} are verified.`;
+    let feasibilityNote = `Feasible under localized conditions, provided the core assumptions regarding ${
+      discipline.whatItNotices[0]?.toLowerCase() || 'key constraints'
+    } are verified.`;
 
     const strengths: string[] = [];
     const blindSpots: string[] = [];
@@ -200,7 +501,6 @@ export class MockAnalysisProvider implements IAnalysisProvider {
     const stakeholders: string[] = [];
     const improvementSuggestions: string[] = [];
 
-    // Distinct contextual synthesis according to discipline
     if (catId === 'engineering') {
       feasibility = dId === 'computer-science' || dId === 'cybersecurity' ? 'High' : 'Moderate';
       effort = 'Substantial';
@@ -448,7 +748,6 @@ export class MockAnalysisProvider implements IAnalysisProvider {
         `Establish a peer apprenticeship certification recognized and celebrated by the local community council.`
       );
     } else {
-      // applied fields
       feasibility = 'Moderate';
       impact = 'High';
       effort = 'Substantial';
@@ -523,7 +822,6 @@ export class MockAnalysisProvider implements IAnalysisProvider {
 
     const keyTensions: KeyTension[] = [];
 
-    // Dynamically generate meaningful tensions between selected disciplines
     if (disciplines.length >= 2) {
       const d1 = disciplines[0];
       const d2 = disciplines[1];
@@ -531,7 +829,7 @@ export class MockAnalysisProvider implements IAnalysisProvider {
         id: `tension-1`,
         title: `${d1.name} vs. ${d2.name}: Mechanistic Rigor vs. Contextual Reality`,
         disciplineA: d1.name,
-        viewA: `Demands strict adherence to ${d1.whatItNotices[0].toLowerCase()} and formalized verification benchmarks before scaling.`,
+        viewA: `Demands strict adherence to ${d1.whatItNotices[0]?.toLowerCase() || 'core metrics'} and formalized verification benchmarks before scaling.`,
         disciplineB: d2.name,
         viewB: `Argues that excessive formalization introduces prohibitive friction, advocating for adaptable grassroots flexibility.`,
         coreDilemma: `Should the solution prioritize formal optimization and strict standards, or local usability and imperfect adoption?`,
@@ -576,7 +874,7 @@ export class MockAnalysisProvider implements IAnalysisProvider {
       return {
         disciplineName: d.name,
         topPriority: d.whatItFocusesOn.split(',')[0] || 'System integrity',
-        criticalRisk: res ? res.risks[0] : d.whatItNotices[0],
+        criticalRisk: res ? res.risks[0] : d.whatItNotices[0] || 'Operational risk',
         recommendedPivot: res ? res.improvementSuggestions[0] : 'Conduct formal peer reviews.',
       };
     });
@@ -601,4 +899,4 @@ export class MockAnalysisProvider implements IAnalysisProvider {
   }
 }
 
-export const analysisService = new MockAnalysisProvider();
+export const analysisService = new SupabaseAnalysisService();

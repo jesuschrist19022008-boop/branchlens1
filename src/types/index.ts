@@ -18,6 +18,7 @@ export interface DisciplineCategory {
 
 export interface Discipline {
   id: string;
+  slug?: string;
   name: string;
   categoryId: DisciplineCategoryId;
   categoryName: string;
@@ -54,6 +55,7 @@ export interface Problem {
   isSaved?: boolean;
   tags?: string[];
   difficulty?: 'Accessible' | 'Intermediate' | 'Complex';
+  author?: string;
 }
 
 export interface Solution {
@@ -62,11 +64,13 @@ export interface Solution {
   title: string;
   proposedApproach: string;
   howItWorks: string;
-  implementationPlan: string;
-  resourcesRequired: string;
+  implementationPlan?: string;
+  resourcesRequired?: string;
   tradeOffs: string;
-  risks: string;
+  risks?: string;
   additionalNotes?: string;
+  targetAudience?: string;
+  keyAssumptions?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -138,7 +142,7 @@ export interface AnalysisSession {
   solutionTitle: string;
   selectedDisciplineIds: string[];
   results: Record<string, LensResult>;
-  comparison: CrossLensComparison;
+  comparison?: CrossLensComparison;
   createdAt: string;
   updatedAt: string;
 }

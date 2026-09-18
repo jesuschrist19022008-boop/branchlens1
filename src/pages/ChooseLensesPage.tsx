@@ -13,6 +13,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { analysisService } from '../services/analysisService';
 import { lensService } from '../services/lensService';
 import { AppView, Discipline, DisciplineCategory, Problem, Solution } from '../types';
 import { Badge } from '../components/Badge';
@@ -34,23 +35,32 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
   const [categories, setCategories] = useState<DisciplineCategory[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedLensIds, setSelectedLensIds] = useState<string[]>([
-    'environmental_science',
-    'economics',
-    'computer_science',
-    'sociology',
-  ]); // sensible pre-selected balanced set
+  const [selectedLensIds, setSelectedLensIds] = useState<string[]>([]);
 
   useEffect(() => {
     const list = lensService.getAllDisciplines();
     const cats = lensService.getCategories();
     setAllDisciplines(list);
     setCategories(cats);
-  }, []);
 
-  const toggleLens = (id: string) => {
+    // Check if solution already has saved lenses in Supabase
+    const initLenses = async () => {
+      const savedLenses = await analysisService.getSolutionLenses(solution.id);
+      if (savedLenses && savedLenses.length > 0) {
+        setSelectedLensIds(savedLenses);
+      } else {
+        const defaultUuids = ['environmental-science', 'economics', 'computer-science', 'sociology']
+          .map((slug) => lensService.getDisciplineUuid(slug));
+        setSelectedLensIds(defaultUuids);
+      }
+    };
+    initLenses();
+  }, [solution.id]);
+
+  const toggleLens = (idOrSlug: string) => {
+    const realUuid = lensService.getDisciplineUuid(idOrSlug);
     setSelectedLensIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+      prev.includes(realUuid) ? prev.filter((item) => item !== realUuid) : [...prev, realUuid]
     );
   };
 
@@ -60,11 +70,23 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
 
   const selectSuggestedTriad = (type: 'balanced' | 'technical' | 'humanities') => {
     if (type === 'balanced') {
-      setSelectedLensIds(['environmental_science', 'economics', 'sociology', 'mechanical_engineering']);
+      setSelectedLensIds(
+        ['environmental-science', 'economics', 'sociology', 'mechanical-engineering'].map((s) =>
+          lensService.getDisciplineUuid(s)
+        )
+      );
     } else if (type === 'technical') {
-      setSelectedLensIds(['computer_science', 'materials_science', 'mechanical_engineering', 'data_science']);
+      setSelectedLensIds(
+        ['computer-science', 'materials-science', 'mechanical-engineering', 'data-science'].map((s) =>
+          lensService.getDisciplineUuid(s)
+        )
+      );
     } else {
-      setSelectedLensIds(['philosophy_ethics', 'sociology', 'anthropology', 'public_policy']);
+      setSelectedLensIds(
+        ['philosophy-ethics', 'sociology', 'anthropology', 'public-policy'].map((s) =>
+          lensService.getDisciplineUuid(s)
+        )
+      );
     }
   };
 

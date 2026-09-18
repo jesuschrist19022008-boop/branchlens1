@@ -207,7 +207,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onNavigate }) => {
                       <span className="font-semibold text-zinc-900 text-[11px] font-mono uppercase tracking-wide block mb-1">
                         Observed Evidence:
                       </span>
-                      <p className="italic text-zinc-700 leading-relaxed">"{dim.evidenceNote}"</p>
+                      <p className="italic text-zinc-700 leading-relaxed">"{dim.evidenceNote || dim.evidenceNotes?.[0] || 'Continuous observational signal across exploratory sessions.'}"</p>
                     </div>
                   </div>
 
@@ -216,7 +216,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onNavigate }) => {
                       Related Disciplinary Lenses:
                     </span>
                     <div className="flex flex-wrap gap-1">
-                      {dim.relatedDisciplines.map((d, i) => (
+                      {(dim.relatedDisciplines || dim.relatedDisciplineInteractions || []).map((d, i) => (
                         <span
                           key={i}
                           className="rounded-md bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-700"
