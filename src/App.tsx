@@ -194,7 +194,9 @@ export default function App() {
     if (!selectedProblem || !selectedSolution) return;
 
     // Convert all inputs to real UUIDs from public.disciplines.id
-    const realDisciplineUuids = selectedDisciplineIds.map((id) => lensService.getDisciplineUuid(id));
+    const realDisciplineUuids = Array.from(
+      new Set(selectedDisciplineIds.map((id) => lensService.getDisciplineUuid(id)))
+    );
     const discs = lensService.getDisciplinesByIds(realDisciplineUuids);
     setActiveAnalysisDisciplines(discs);
     navigateTo('analysis-loading');

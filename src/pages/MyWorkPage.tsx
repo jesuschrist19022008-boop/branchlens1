@@ -256,11 +256,11 @@ export const MyWorkPage: React.FC<MyWorkPageProps> = ({
 
                 <div className="mt-4 flex flex-wrap items-center gap-1.5">
                   <span className="text-[11px] text-zinc-500">Lenses Compared:</span>
-                  {sess.selectedDisciplineIds.map((dId) => {
+                  {Array.from(new Set(sess.selectedDisciplineIds || [])).map((dId, idx) => {
                     const res = sess.results[dId];
                     return (
                       <span
-                        key={dId}
+                        key={`${dId}-${idx}`}
                         className="rounded-md bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-800"
                       >
                         {res ? res.disciplineName : dId}

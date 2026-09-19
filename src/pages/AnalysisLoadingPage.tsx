@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { Compass, Sparkles, CheckCircle2, Layers, Cpu, Eye } from 'lucide-react';
 import { AnalysisStage, Discipline } from '../types';
 
@@ -18,6 +18,15 @@ export const AnalysisLoadingPage: React.FC<AnalysisLoadingPageProps> = ({
   onComplete,
 }) => {
   const [activeQuoteIndex, setActiveQuoteIndex] = useState(0);
+
+  const uniqueDisciplines = useMemo(() => {
+    const seen = new Set<string>();
+    return selectedDisciplines.filter((d) => {
+      if (!d || !d.id || seen.has(d.id)) return false;
+      seen.add(d.id);
+      return true;
+    });
+  }, [selectedDisciplines]);
 
   const reflectiveQuotes = [
     {
@@ -100,16 +109,16 @@ export const AnalysisLoadingPage: React.FC<AnalysisLoadingPageProps> = ({
 
         {/* Selected Lenses Pipeline Indicators */}
         <div className="mt-8 grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {selectedDisciplines.map((disc, idx) => {
+          {uniqueDisciplines.map((disc, idx) => {
             const isCompleted =
-              progressPercent >= ((idx + 1) / selectedDisciplines.length) * 80;
+              progressPercent >= ((idx + 1) / uniqueDisciplines.length) * 80;
             const isCurrent =
               currentDisciplineName === disc.name ||
               (!currentDisciplineName && idx === 0);
 
             return (
               <div
-                key={disc.id}
+                key={`${disc.id}-${idx}`}
                 className={`rounded-xl border p-2.5 text-left transition-all ${
                   isCompleted
                     ? 'border-emerald-200 bg-emerald-50/60 text-emerald-950'

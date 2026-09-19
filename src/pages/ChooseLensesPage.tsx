@@ -47,10 +47,14 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
     const initLenses = async () => {
       const savedLenses = await analysisService.getSolutionLenses(solution.id);
       if (savedLenses && savedLenses.length > 0) {
-        setSelectedLensIds(savedLenses);
+        setSelectedLensIds(Array.from(new Set(savedLenses)));
       } else {
-        const defaultUuids = ['environmental-science', 'economics', 'computer-science', 'sociology']
-          .map((slug) => lensService.getDisciplineUuid(slug));
+        const defaultUuids = Array.from(
+          new Set(
+            ['environmental-science', 'economics', 'computer-science', 'sociology']
+              .map((slug) => lensService.getDisciplineUuid(slug))
+          )
+        );
         setSelectedLensIds(defaultUuids);
       }
     };
@@ -59,9 +63,15 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
 
   const toggleLens = (idOrSlug: string) => {
     const realUuid = lensService.getDisciplineUuid(idOrSlug);
-    setSelectedLensIds((prev) =>
-      prev.includes(realUuid) ? prev.filter((item) => item !== realUuid) : [...prev, realUuid]
-    );
+    setSelectedLensIds((prev) => {
+      const set = new Set(prev);
+      if (set.has(realUuid)) {
+        set.delete(realUuid);
+      } else {
+        set.add(realUuid);
+      }
+      return Array.from(set);
+    });
   };
 
   const clearAllLenses = () => {
@@ -71,20 +81,32 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
   const selectSuggestedTriad = (type: 'balanced' | 'technical' | 'humanities') => {
     if (type === 'balanced') {
       setSelectedLensIds(
-        ['environmental-science', 'economics', 'sociology', 'mechanical-engineering'].map((s) =>
-          lensService.getDisciplineUuid(s)
+        Array.from(
+          new Set(
+            ['environmental-science', 'economics', 'sociology', 'mechanical-engineering'].map((s) =>
+              lensService.getDisciplineUuid(s)
+            )
+          )
         )
       );
     } else if (type === 'technical') {
       setSelectedLensIds(
-        ['computer-science', 'materials-science', 'mechanical-engineering', 'data-science'].map((s) =>
-          lensService.getDisciplineUuid(s)
+        Array.from(
+          new Set(
+            ['computer-science', 'materials-science', 'mechanical-engineering', 'data-science'].map((s) =>
+              lensService.getDisciplineUuid(s)
+            )
+          )
         )
       );
     } else {
       setSelectedLensIds(
-        ['philosophy-ethics', 'sociology', 'anthropology', 'public-policy'].map((s) =>
-          lensService.getDisciplineUuid(s)
+        Array.from(
+          new Set(
+            ['philosophy-ethics', 'sociology', 'anthropology', 'public-policy'].map((s) =>
+              lensService.getDisciplineUuid(s)
+            )
+          )
         )
       );
     }
@@ -310,9 +332,9 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
 
               {/* Selected chips list */}
               <div className="flex items-center gap-1.5 overflow-x-auto">
-                {selectedDisciplines.slice(0, 5).map((d) => (
+                {selectedDisciplines.slice(0, 5).map((d, idx) => (
                   <span
-                    key={d.id}
+                    key={`${d.id}-${idx}`}
                     className="inline-flex items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white shadow-2xs shrink-0"
                   >
                     {d.name.split(' ')[0]}
@@ -340,7 +362,7 @@ export const ChooseLensesPage: React.FC<ChooseLensesPageProps> = ({
               <button
                 id="run-analysis-btn"
                 disabled={selectedLensIds.length === 0}
-                onClick={() => onRunAnalysis(selectedLensIds)}
+                onClick={() => onRunAnalysis(Array.from(new Set(selectedLensIds)))}
                 className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-800 px-7 py-3 text-xs font-bold text-white shadow-md hover:bg-emerald-900 active:scale-98 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <Sparkles className="h-4 w-4 text-emerald-200" />

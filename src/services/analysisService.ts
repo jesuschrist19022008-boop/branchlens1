@@ -86,7 +86,7 @@ class SupabaseAnalysisService {
         .eq('solution_id', realSolutionUuid);
 
       if (!error && data && data.length > 0) {
-        return data.map((row: any) => row.discipline_id);
+        return Array.from(new Set(data.map((row: any) => row.discipline_id).filter(Boolean)));
       }
     } catch {
       // fallback
@@ -120,7 +120,14 @@ class SupabaseAnalysisService {
     const selectedDisciplineUuids = await this.getSolutionLenses(realSolutionUuid);
 
     // 4. Query public.lens_analyses for this solution
-    const { data: authData } = await supabase.auth.getUser();
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError) {
+      console.warn('[supabase.auth.getUser in getAnalysesForSolution]', {
+        code: (authError as any)?.code,
+        message: (authError as any)?.message,
+        details: (authError as any)?.details,
+      });
+    }
     const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
 
     let analysisRows: any[] = [];
@@ -130,7 +137,14 @@ class SupabaseAnalysisService {
         .select('*')
         .eq('solution_id', realSolutionUuid);
 
-      if (!error && data) {
+      if (error) {
+        console.error('[lens_analyses fetch error in getAnalysesForSolution]', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+      } else if (data) {
         analysisRows = data;
       }
     } catch (err) {
@@ -155,11 +169,13 @@ class SupabaseAnalysisService {
 
     analysisRows.forEach((row: any) => {
       const dUuid = row.discipline_id;
-      analyzedDisciplineUuids.push(dUuid);
+      if (!dUuid) return;
       const disc = lensService.getDisciplineById(dUuid);
-
-      if (disc) {
-        analyzedDisciplines.push(disc);
+      if (!analyzedDisciplineUuids.includes(dUuid)) {
+        analyzedDisciplineUuids.push(dUuid);
+        if (disc) {
+          analyzedDisciplines.push(disc);
+        }
       }
 
       const raw = row.raw_output || {};
@@ -219,10 +235,45 @@ class SupabaseAnalysisService {
       (id) => !analyzedDisciplineUuids.includes(id)
     );
 
-    // Synthesize comparison
-    const comparison = problem && solution
-      ? this.generateComparison(problem, solution, analyzedDisciplines, results)
-      : undefined;
+    // 6. Query public.comparisons for saved cross-lens comparison
+    let comparison: CrossLensComparison | undefined;
+    try {
+      const { data: compRows, error: compError } = await supabase
+        .from('comparisons')
+        .select('*')
+        .eq('solution_id', realSolutionUuid)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (compError) {
+        console.error('[comparisons select error]', {
+          code: compError.code,
+          message: compError.message,
+          details: compError.details,
+          hint: compError.hint,
+        });
+      } else if (compRows && compRows.length > 0) {
+        const compRow = compRows[0];
+        const raw = compRow.raw_output || {};
+        comparison = {
+          areasOfAgreement: compRow.areas_of_agreement || raw.areasOfAgreement || compRow.where_disciplines_agree || [],
+          keyTensions: compRow.key_tensions || raw.keyTensions || [],
+          priorityMatrix: compRow.priority_matrix || raw.priorityMatrix || [],
+          synthesisSummary: compRow.synthesis_summary || raw.synthesisSummary || compRow.summary || '',
+          unanimousBlindspot: compRow.unanimous_blindspot || raw.unanimousBlindspot || '',
+          whereDisciplinesAgree: compRow.areas_of_agreement || raw.areasOfAgreement || [],
+          unanimousBlindSpots: compRow.unanimous_blindspot ? [compRow.unanimous_blindspot] : raw.unanimousBlindSpots || [],
+        };
+      }
+    } catch (err) {
+      console.error('Error fetching comparison from Supabase:', err);
+    }
+
+    // If not found in database, but we have problem, solution and analyses, generate and save it
+    if (!comparison && problem && solution && analyzedDisciplines.length > 0) {
+      comparison = this.generateComparison(problem, solution, analyzedDisciplines, results);
+      await this.saveComparison(problem.id, solution.id, comparison);
+    }
 
     const session: AnalysisSession = {
       id: `session-${realSolutionUuid}`,
@@ -277,8 +328,22 @@ class SupabaseAnalysisService {
       selectedDisciplineIdsOrSlugs
     );
 
+    // Delete existing analyses for this solution to prevent duplicate records
+    try {
+      await supabase.from('lens_analyses').delete().eq('solution_id', realSolutionUuid);
+    } catch {
+      // ignore
+    }
+
     // 4. Auth user
-    const { data: authData } = await supabase.auth.getUser();
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError) {
+      console.warn('[supabase.auth.getUser in executeAnalysis]', {
+        code: (authError as any)?.code,
+        message: (authError as any)?.message,
+        details: (authError as any)?.details,
+      });
+    }
     const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
 
     const total = selectedDisciplineUuids.length;
@@ -309,7 +374,9 @@ class SupabaseAnalysisService {
       }
 
       if (disc) {
-        analyzedDisciplines.push(disc);
+        if (!analyzedDisciplines.some((d) => d.id === disc.id)) {
+          analyzedDisciplines.push(disc);
+        }
         // Generate tailored lens result from actual problem + solution + discipline
         const lensResult = this.generateSpecificLensResult(persistedProblem, savedSolution, disc);
         results[dUuid] = lensResult;
@@ -341,10 +408,33 @@ class SupabaseAnalysisService {
         try {
           const { error: insertError } = await supabase.from('lens_analyses').insert(row);
           if (insertError) {
-            console.warn(`Notice persisting lens analysis (${dUuid}):`, insertError.message || insertError);
+            console.error(`[lens_analyses insert failed for ${dUuid}]`, {
+              code: insertError.code,
+              message: insertError.message,
+              details: insertError.details,
+              hint: insertError.hint,
+            });
+          } else {
+            // Verify that the row exists in public.lens_analyses
+            const { data: verifyData, error: verifyError } = await supabase
+              .from('lens_analyses')
+              .select('id')
+              .eq('id', row.id)
+              .single();
+            if (verifyError || !verifyData) {
+              console.warn(`[lens_analyses verify check for ${dUuid}]`, {
+                code: verifyError?.code,
+                message: verifyError?.message,
+                details: verifyError?.details,
+                hint: verifyError?.hint,
+              });
+            }
           }
-        } catch (err) {
-          console.warn(`Failed to insert lens analysis (${dUuid}):`, err);
+        } catch (err: any) {
+          console.error(`Failed to insert lens analysis (${dUuid}):`, {
+            message: err?.message || String(err),
+            details: err?.details || null,
+          });
         }
       }
     }
@@ -354,13 +444,14 @@ class SupabaseAnalysisService {
     }
     await new Promise((r) => setTimeout(r, 200));
 
-    // Synthesize comparison
+    // Synthesize comparison and persist to public.comparisons
     const comparison = this.generateComparison(
       persistedProblem,
       savedSolution,
       analyzedDisciplines,
       results
     );
+    await this.saveComparison(persistedProblem.id, realSolutionUuid, comparison);
 
     // 8. DO NOT show "analysis complete" until database inserts succeed!
     if (onProgressUpdate) {
@@ -384,6 +475,71 @@ class SupabaseAnalysisService {
   }
 
   /**
+   * Persists the synthesized cross-lens comparison to public.comparisons
+   */
+  public async saveComparison(
+    problemId: string,
+    solutionId: string,
+    comparison: CrossLensComparison
+  ): Promise<CrossLensComparison> {
+    const realSolutionUuid = solutionService.getSolutionUuid(solutionId);
+    const realProblemUuid = problemService.getProblemUuid(problemId);
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
+
+    const comparisonId = ensureUuid();
+
+    // Remove existing comparison for this solution to prevent duplicate rows
+    try {
+      await supabase.from('comparisons').delete().eq('solution_id', realSolutionUuid);
+    } catch {
+      // ignore
+    }
+
+    const payload = {
+      id: comparisonId,
+      user_id: userId,
+      solution_id: realSolutionUuid,
+      problem_id: realProblemUuid,
+      areas_of_agreement: comparison.areasOfAgreement,
+      key_tensions: comparison.keyTensions,
+      priority_matrix: comparison.priorityMatrix,
+      synthesis_summary: comparison.synthesisSummary,
+      unanimous_blindspot: comparison.unanimousBlindspot,
+      raw_output: comparison,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error: insertError } = await supabase.from('comparisons').insert(payload);
+    if (insertError) {
+      console.error('[comparisons insert failed]', {
+        code: insertError.code,
+        message: insertError.message,
+        details: insertError.details,
+        hint: insertError.hint,
+      });
+    } else {
+      // Verify row exists in public.comparisons
+      const { data: verifyData, error: verifyError } = await supabase
+        .from('comparisons')
+        .select('id')
+        .eq('id', comparisonId)
+        .single();
+      if (verifyError || !verifyData) {
+        console.warn('[comparisons verify check]', {
+          code: verifyError?.code,
+          message: verifyError?.message,
+          details: verifyError?.details,
+          hint: verifyError?.hint,
+        });
+      }
+    }
+
+    return comparison;
+  }
+
+  /**
    * Generates analysis for missing disciplines and persists them to public.lens_analyses
    */
   public async generateMissingAnalyses(
@@ -397,13 +553,34 @@ class SupabaseAnalysisService {
     const problem = await problemService.getProblemById(solution.problemId);
     if (!problem) throw new Error('Problem not found');
 
-    const { data: authData } = await supabase.auth.getUser();
+    const { data: authData, error: authError } = await supabase.auth.getUser();
+    if (authError) {
+      console.warn('[supabase.auth.getUser in generateMissingAnalyses]', {
+        code: (authError as any)?.code,
+        message: (authError as any)?.message,
+        details: (authError as any)?.details,
+      });
+    }
     const userId = authData?.user?.id || DEFAULT_SUPABASE_USER_ID;
 
-    for (const dIdOrSlug of missingDisciplineIds) {
-      const dUuid = lensService.getDisciplineUuid(dIdOrSlug);
+    const uniqueMissingUuids = Array.from(
+      new Set(missingDisciplineIds.map((idOrSlug) => lensService.getDisciplineUuid(idOrSlug)))
+    );
+
+    for (const dUuid of uniqueMissingUuids) {
       const disc = lensService.getDisciplineById(dUuid);
       if (disc) {
+        // Delete any existing row for this discipline to avoid duplicates
+        try {
+          await supabase
+            .from('lens_analyses')
+            .delete()
+            .eq('solution_id', realSolutionUuid)
+            .eq('discipline_id', dUuid);
+        } catch {
+          // ignore
+        }
+
         const lensResult = this.generateSpecificLensResult(problem, solution, disc);
         const row = {
           id: ensureUuid(),
@@ -430,10 +607,33 @@ class SupabaseAnalysisService {
         try {
           const { error: insertError } = await supabase.from('lens_analyses').insert(row);
           if (insertError) {
-            console.warn('Notice persisting missing lens analysis:', insertError.message || insertError);
+            console.error(`[lens_analyses insert failed for missing ${dUuid}]`, {
+              code: insertError.code,
+              message: insertError.message,
+              details: insertError.details,
+              hint: insertError.hint,
+            });
+          } else {
+            // Verify that the row exists in public.lens_analyses
+            const { data: verifyData, error: verifyError } = await supabase
+              .from('lens_analyses')
+              .select('id')
+              .eq('id', row.id)
+              .single();
+            if (verifyError || !verifyData) {
+              console.warn(`[lens_analyses verify check for missing ${dUuid}]`, {
+                code: verifyError?.code,
+                message: verifyError?.message,
+                details: verifyError?.details,
+                hint: verifyError?.hint,
+              });
+            }
           }
-        } catch (err) {
-          console.warn('Failed to insert missing lens analysis:', err);
+        } catch (err: any) {
+          console.error(`Failed to insert missing lens analysis (${dUuid}):`, {
+            message: err?.message || String(err),
+            details: err?.details || null,
+          });
         }
       }
     }

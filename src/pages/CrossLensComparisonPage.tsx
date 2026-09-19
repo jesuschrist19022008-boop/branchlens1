@@ -52,6 +52,16 @@ export const CrossLensComparisonPage: React.FC<CrossLensComparisonPageProps> = (
     }
   }, [effectiveSolutionId, initialSession]);
 
+  const rawResults = session?.results ? Object.values(session.results) : [];
+  const results = React.useMemo(() => {
+    const seen = new Set<string>();
+    return rawResults.filter((r) => {
+      if (!r || !r.disciplineId || seen.has(r.disciplineId)) return false;
+      seen.add(r.disciplineId);
+      return true;
+    });
+  }, [rawResults]);
+
   if (loading) {
     return (
       <div className="min-h-[70vh] flex flex-col items-center justify-center p-6 bg-[#FAF9F6] text-center">
@@ -62,7 +72,6 @@ export const CrossLensComparisonPage: React.FC<CrossLensComparisonPageProps> = (
   }
 
   const comparison = session?.comparison;
-  const results = session?.results ? Object.values(session.results) : [];
 
   if (!comparison || results.length === 0) {
     return (
@@ -189,9 +198,9 @@ ${comparison.synthesisSummary}
 
           <div className="mt-6 pt-5 border-t border-zinc-100 flex flex-wrap items-center gap-2">
             <span className="text-xs font-mono uppercase text-zinc-500 mr-2">Evaluated Inquiries:</span>
-            {results.map((r) => (
+            {results.map((r, idx) => (
               <span
-                key={r.disciplineId}
+                key={`${r.disciplineId}-${idx}`}
                 className="rounded-lg bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-800"
               >
                 {r.disciplineName}

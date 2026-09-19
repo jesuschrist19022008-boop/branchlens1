@@ -127,9 +127,16 @@ class LensService {
   }
 
   public getDisciplinesByIds(idsOrSlugs: string[]): Discipline[] {
-    return idsOrSlugs
-      .map((id) => this.getDisciplineById(id))
-      .filter((d): d is Discipline => d !== null);
+    const seen = new Set<string>();
+    const result: Discipline[] = [];
+    for (const id of idsOrSlugs) {
+      const d = this.getDisciplineById(id);
+      if (d && !seen.has(d.id)) {
+        seen.add(d.id);
+        result.push(d);
+      }
+    }
+    return result;
   }
 
   public getDisciplinesByCategory(categoryId: DisciplineCategoryId): Discipline[] {

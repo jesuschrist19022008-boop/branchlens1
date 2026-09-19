@@ -3,8 +3,14 @@ import { SEED_PROBLEMS, SEED_SOLUTIONS } from '../data/problems';
 import { ALL_DISCIPLINES } from '../data/disciplines';
 
 // Environment variable credentials
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabaseUrl =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) ||
+  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) ||
+  '';
+const supabaseAnonKey =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
+  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) ||
+  '';
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl &&
@@ -54,6 +60,31 @@ export function slugToUuid(slug: string): string {
 
 export const DEFAULT_SUPABASE_USER_ID = 'e1e0a701-382a-4a2e-9d22-26f582760001';
 
+const memoryStore = new Map<string, string>();
+
+function safeGetItem(key: string): string | null {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const val = localStorage.getItem(key);
+      if (val !== null) return val;
+    }
+  } catch {
+    // ignore
+  }
+  return memoryStore.get(key) || null;
+}
+
+function safeSetItem(key: string, value: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(key, value);
+    }
+  } catch {
+    // ignore
+  }
+  memoryStore.set(key, value);
+}
+
 /**
  * Local database simulation for sandbox / offline / test environments
  * perfectly adhering to Supabase's table schemas and queries.
@@ -72,7 +103,7 @@ class LocalSupabaseTable {
 
   private ensureInitialSeeds(): void {
     try {
-      const existing = localStorage.getItem(this.getKey());
+      const existing = safeGetItem(this.getKey());
       if (existing) return;
 
       if (this.tableName === 'problems') {
@@ -133,7 +164,7 @@ class LocalSupabaseTable {
 
   public getRows(): Record<string, any>[] {
     try {
-      const data = localStorage.getItem(this.getKey());
+      const data = safeGetItem(this.getKey());
       return data ? JSON.parse(data) : [];
     } catch {
       return [];
@@ -142,7 +173,7 @@ class LocalSupabaseTable {
 
   public saveRows(rows: Record<string, any>[]): void {
     try {
-      localStorage.setItem(this.getKey(), JSON.stringify(rows));
+      safeSetItem(this.getKey(), JSON.stringify(rows));
     } catch {
       // storage full or disabled
     }
@@ -583,7 +614,33 @@ class ResilientQueryBuilder {
     return this;
   }
 
-  async then(resolve: (res: { data: any; error: any }) => void, reject?: (err: any) => void) {
+  async then(resolve: (res: { data: any; error: any; count?: number }) => void, reject?: (err: any) => void) {
+    if (this.realBuilder) {
+      try {
+        const realRes = await this.realBuilder;
+        if (realRes.error) {
+          console.error(`[Supabase Error on ${this.tableName}]`, {
+            code: realRes.error.code,
+            message: realRes.error.message,
+            details: realRes.error.details,
+            hint: realRes.error.hint,
+          });
+        }
+        return Promise.resolve(realRes).then(resolve, reject);
+      } catch (err: any) {
+        console.error(`[Supabase Exception on ${this.tableName}]`, err);
+        return Promise.resolve({
+          data: null,
+          error: {
+            code: err?.code || 'EXCEPTION',
+            message: err?.message || String(err),
+            details: err?.details || err?.stack || null,
+            hint: err?.hint || null,
+          },
+        }).then(resolve, reject);
+      }
+    }
+
     let localRes: { data: any; error: any } = { data: null, error: null };
     try {
       if (this.localBuilder) {
@@ -593,43 +650,7 @@ class ResilientQueryBuilder {
       // ignore
     }
 
-    if (!this.realBuilder) {
-      return Promise.resolve(localRes).then(resolve, reject);
-    }
-
-    try {
-      const realRes = await this.realBuilder;
-
-      // Check if real query succeeded
-      if (!realRes.error) {
-        if (realRes.data !== null && (!Array.isArray(realRes.data) || realRes.data.length > 0)) {
-          return Promise.resolve(realRes).then(resolve, reject);
-        }
-        if (localRes.data !== null && (!Array.isArray(localRes.data) || localRes.data.length > 0)) {
-          return Promise.resolve(localRes).then(resolve, reject);
-        }
-        return Promise.resolve(realRes).then(resolve, reject);
-      }
-
-      // If real query failed (e.g. 42501 permission denied, PGRST204 column missing, etc.)
-      const isExpectedPermissionOrSchemaIssue =
-        realRes.error.code === '42501' ||
-        realRes.error.code === 'PGRST204' ||
-        realRes.error.code === 'PGRST205' ||
-        realRes.error.code === '42703' ||
-        realRes.error.message?.includes('permission denied');
-
-      if (isExpectedPermissionOrSchemaIssue) {
-        console.warn(
-          `[BranchLens] Notice for ${this.tableName}: ${realRes.error.message || realRes.error.code}. Serving reliably from persistent local storage.`
-        );
-      }
-
-      return Promise.resolve(localRes).then(resolve, reject);
-    } catch (err) {
-      console.warn(`[BranchLens] Supabase call exception for ${this.tableName}, served locally:`, err);
-      return Promise.resolve(localRes).then(resolve, reject);
-    }
+    return Promise.resolve(localRes).then(resolve, reject);
   }
 }
 

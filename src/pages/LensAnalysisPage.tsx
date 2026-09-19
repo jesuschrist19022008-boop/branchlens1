@@ -104,6 +104,17 @@ export const LensAnalysisPage: React.FC<LensAnalysisPageProps> = ({
     }
   };
 
+  const allResults = React.useMemo(() => {
+    if (!session?.results) return [];
+    const raw = Object.values(session.results);
+    const seen = new Set<string>();
+    return raw.filter((r) => {
+      if (!r || !r.disciplineId || seen.has(r.disciplineId)) return false;
+      seen.add(r.disciplineId);
+      return true;
+    });
+  }, [session?.results]);
+
   if (loading) {
     return (
       <div className="min-h-[70vh] flex flex-col items-center justify-center p-6 text-center">
@@ -149,7 +160,6 @@ export const LensAnalysisPage: React.FC<LensAnalysisPageProps> = ({
     );
   }
 
-  const allResults = Object.values(session.results);
   const activeResult: LensResult | undefined =
     session.results[activeDisciplineId] || allResults[0];
 
@@ -302,11 +312,11 @@ export const LensAnalysisPage: React.FC<LensAnalysisPageProps> = ({
             Disciplinary Lenses:
           </span>
           <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-thin">
-            {allResults.map((res) => {
+            {allResults.map((res, idx) => {
               const isActive = (activeResult && activeResult.disciplineId === res.disciplineId);
               return (
                 <button
-                  key={res.disciplineId}
+                  key={`${res.disciplineId}-${idx}`}
                   id={`tab-lens-${res.disciplineId}`}
                   onClick={() => setActiveDisciplineId(res.disciplineId)}
                   className={`flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold whitespace-nowrap transition-all ${
